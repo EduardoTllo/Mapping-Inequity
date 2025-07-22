@@ -1,0 +1,27 @@
+---
+title: "DF_cleaning"
+format: html
+---
+
+```{r}
+# Read and filter categories
+df <- read.csv("TB.csv", sep=";", dec=",", stringsAsFactors = FALSE)
+idx <- grepl("^(I|II|III)(-|$)", df$categoria)
+df2 <- df[idx, ]
+df2$cat_pref <- sub("-.*", "", df2$categoria)
+
+# Clean and convert coordinates
+df2$longitud <- as.numeric(ifelse(df2$longitud == "", NA, df2$longitud))
+df2$latitud  <- as.numeric(ifelse(df2$latitud  == "", NA, df2$latitud))
+df2 <- df2[complete.cases(df2[, c("latitud", "longitud")]), ]
+
+# Create three base‐R data.frames by category
+df_I   <- df2[df2$cat_pref == "I",   c("latitud", "longitud")]
+df_II  <- df2[df2$cat_pref == "II",  c("latitud", "longitud")]
+df_III <- df2[df2$cat_pref == "III", c("latitud", "longitud")]
+
+# Save to CSV files
+write.csv(df_I,   "coords_I.csv",   row.names = FALSE)
+write.csv(df_II,  "coords_II.csv",  row.names = FALSE)
+write.csv(df_III, "coords_III.csv", row.names = FALSE)
+```
