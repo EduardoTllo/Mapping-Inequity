@@ -1,0 +1,316 @@
+---
+title: "graphics and data export"
+format: html
+---
+## 1. Load Extended Data and Cost Rasters
+```{r}
+# Read the per-category extracted data frames and cost rasters
+df_ext1 <- readRDS("df_ext1.rds")
+cost1   <- terra::rast("cost1.tif")
+
+df_ext2 <- readRDS("df_ext2.rds")
+cost2   <- terra::rast("cost2.tif")
+
+df_ext3 <- readRDS("df_ext3.rds")
+cost3   <- terra::rast("cost3.tif")
+```
+
+## 2. Combine Categories I, II, and III
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(broom)
+library(writexl)
+library(forcats)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+
+
+# Stack all three category data frames into one, filter out missing times
+df_all <- bind_rows(
+  df_ext1 %>% mutate(category = "I"),
+  df_ext2 %>% mutate(category = "II"),
+  df_ext3 %>% mutate(category = "III")
+) %>%
+  select(departamento, provincia, category, tiempo) %>%
+  filter(!is.na(tiempo))
+```
+
+
+# Boxplots by Department for Each Category
+```{r}
+library(dplyr)
+library(forcats)
+library(ggplot2)
+library(scales)
+
+# Function to create and save a boxplot for one category
+plot_category <- function(cat, df, output_file) {
+  df_cat <- df %>%
+    filter(category == cat) %>%
+    mutate(
+      time_h      = tiempo / 60,
+      departamento = fct_reorder(departamento, time_h, median)
+    )
+  
+  # Median per province (for overlay points)
+  df_prov_med <- df_cat %>%
+    group_by(departamento, provincia) %>%
+    summarise(median_h = median(time_h, na.rm = TRUE), .groups = "drop") %>%
+    mutate(departamento = fct_reorder(departamento, median_h, median))
+  
+  p <- ggplot(df_cat, aes(x = departamento, y = time_h)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_point(
+      data    = df_prov_med,
+      aes(x = departamento, y = median_h),
+      shape   = 1,
+      color   = "red",
+      size    = 1.5,
+      stroke  = 0.8
+    ) +
+    geom_hline(
+      yintercept = 4,
+      colour     = "goldenrod",
+      size       = 0.25
+    ) +
+    annotate(
+      "text",
+      x     = Inf,
+      y     = 4,
+      label = "4 hours",
+      hjust = 1.1,
+      vjust = -0.4,
+      size  = 3.5
+    ) +
+    scale_y_continuous(
+      "Time (h)",
+      labels = number_format(accuracy = 1),
+      expand = expansion(mult = c(0, 0.05))
+    ) +
+    labs(x = NULL) +
+    theme_minimal(base_size = 12) +
+    theme(
+      axis.text.x     = element_text(angle = 45, hjust = 1),
+      legend.position = "none",
+      plot.margin     = margin(r = 20)
+    )
+  
+  ggsave(
+    filename = output_file,
+    plot     = p,
+    width    = 10,
+    height   = 5,
+    dpi      = 300
+  )
+}
+
+# Generate boxplots for categories III, II, and I
+plot_category("III", df_all, "boxplot_catIII_departments.png")
+plot_category("II",  df_all, "boxplot_catII_departments.png")
+plot_category("I",   df_all, "boxplot_catI_departments.png")
+```
+
+## 4. Provincial Medians Distribution
+```{r}
+library(ggplot2)
+
+# Build a vector of provincial medians for all of category III as example
+df_prov_med <- df_all %>%
+  filter(category == "III") %>%
+  mutate(time_h = tiempo / 60) %>%
+  group_by(provincia) %>%
+  summarise(median_h = median(time_h, na.rm = TRUE), .groups = "drop")
+
+# Boxplot + jitter of provincial medians
+p2 <- ggplot(df_prov_med, aes(x = "", y = median_h)) +
+  geom_boxplot(fill = "#A6CEE3", outlier.shape = NA, width = 0.4) +
+  geom_jitter(shape = 1, size = 2, width = 0.12, color = "red") +
+  scale_y_continuous(
+    "Median travel time (h)",
+    labels = scales::number_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x     = NULL,
+    title = "Distribution of Provincial Median\nTravel Times to Type III Centers (Peru)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    plot.title   = element_text(face = "bold", hjust = 0.5)
+  )
+
+# Save figure
+ggsave(
+  "boxplot_province_medians_peru.png",
+  plot   = p2,
+  width  = 6,
+  height = 5,
+  dpi    = 300
+)
+
+```
+
+## 5. Export Summary Tables to Excel
+```{r}
+library(dplyr)
+library(tidyr)
+library(writexl)
+
+# 5.1 Summary by department + province + category
+summary_dept_prov_cat <- df_all %>%
+  group_by(departamento, provincia, category) %>%
+  summarise(
+    count       = n(),
+    time_min    = min(tiempo, na.rm = TRUE),
+    time_median = median(tiempo, na.rm = TRUE),
+    time_mean   = mean(tiempo, na.rm = TRUE),
+    time_max    = max(tiempo, na.rm = TRUE),
+    .groups     = "drop"
+  ) %>%
+  pivot_wider(
+    names_from  = category,
+    values_from = c(count, time_min, time_median, time_mean, time_max),
+    names_glue  = "{category}_{.value}"
+  ) %>%
+  arrange(departamento, provincia)
+
+# 5.2 Summary by department + category only
+summary_dept_cat <- df_all %>%
+  group_by(departamento, category) %>%
+  summarise(
+    count       = n(),
+    time_min    = min(tiempo, na.rm = TRUE),
+    time_median = median(tiempo, na.rm = TRUE),
+    time_mean   = mean(tiempo, na.rm = TRUE),
+    time_max    = max(tiempo, na.rm = TRUE),
+    .groups     = "drop"
+  ) %>%
+  pivot_wider(
+    names_from  = category,
+    values_from = c(count, time_min, time_median, time_mean, time_max),
+    names_glue  = "{category}_{.value}"
+  ) %>%
+  arrange(departamento)
+
+# Write both tables to an Excel workbook
+write_xlsx(
+  list(
+    "By_Department_Province_Category" = summary_dept_prov_cat,
+    "By_Department_Category"          = summary_dept_cat
+  ),
+  "summary_tables_by_department.xlsx"
+)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(writexl)
+
+# df_all must have the columns: departamento, provincia, categoria (I, II, III), tiempo
+
+# 1) Calculate statistics by department–province–category
+tabla_cat <- df_all %>%
+  group_by(departamento, provincia, category) %>%
+  summarise(
+    n           = n(),
+    tiempo_min  = min(tiempo,   na.rm = TRUE),
+    tiempo_med  = median(tiempo,na.rm = TRUE),
+    tiempo_mean = mean(tiempo,  na.rm = TRUE),
+    tiempo_max  = max(tiempo,   na.rm = TRUE),
+    .groups     = "drop"
+  )
+
+# 2) Pivot to “wide” format: one row per department/province, columns per category
+tabla_wide <- tabla_cat %>%
+  pivot_wider(
+    names_from  = category,
+    values_from = c(n, tiempo_min, tiempo_med, tiempo_mean, tiempo_max),
+    names_glue  = "{category}_{.value}"
+  ) %>%
+  arrange(departamento, provincia)
+
+# 3) (Optional) Preview the first rows
+print(head(tabla_wide))
+
+# 4) Export to Excel
+write_xlsx(
+  list("Summary_I_II_III" = tabla_wide),
+  "summary_by_department_province_category.xlsx"
+)
+
+```
+
+
+## 6. Generate Accessibility Cost Maps
+```{r}
+library(terra)
+library(sf)
+library(tmap)
+
+# Create output directory
+dir.create("fig_costs", showWarnings = FALSE)
+
+# 6.1 Load cost rasters and ensure UTM-18S CRS
+cost_files <- c(I = "cost1.tif", II = "cost2.tif", III = "cost3.tif")
+cost_list  <- lapply(cost_files, function(f) {
+  r <- rast(f)
+  if (is.na(crs(r))) crs(r) <- "EPSG:32718"
+  names(r) <- "cost"
+  r
+})
+
+# 6.2 Load province borders in WGS84
+provs_ll <- st_read("Provincial INEI 2023 geogpsperu SuyoPomalia.shp") %>%
+  st_transform(4326)
+
+# 6.3 Legend breaks & labels
+breaks_h <- c(0,0.5,1,2,3,4,5,6,7,8,9,10,11,12, Inf)
+labels_h <- c("0–0.5 h","0.5–1 h","1–2 h","2–3 h","3–4 h","4–5 h",
+              "5–6 h","6–7 h","7–8 h","8–9 h","9–10 h","10–11 h",
+              "11–12 h",">12 h")
+
+tmap_mode("plot")
+
+# 6.4 Loop to build and save maps
+for(cat in names(cost_list)) {
+  # Convert to hours and reproject to WGS84
+  cost_h    <- cost_list[[cat]] / 60
+  cost_h_ll <- project(cost_h, "EPSG:4326", method = "bilinear")
+  
+  # Build tmap object
+  m <- tm_shape(cost_h_ll) +
+         tm_raster(palette    = "YlOrRd",
+                   style      = "fixed",
+                   breaks     = breaks_h,
+                   labels     = labels_h,
+                   title      = "Time (h)") +
+       tm_shape(provs_ll) +
+         tm_borders(col = "grey30", lwd = 0.5) +
+       tm_compass(position = c("left","top")) +
+       tm_scale_bar(breaks   = c(0,200,400,600),
+                    position = c("left","bottom")) +
+       tm_layout(
+         main.title      = paste0("Total access cost – Type ", cat),
+         main.title.size = 1.2,
+         legend.outside  = TRUE,
+         frame           = FALSE,
+         inner.margins   = c(0.02,0.02,0.02,0.25)
+       )
+  
+  # Save PNG
+  tmap_save(
+    m,
+    filename = file.path("fig_costs",
+                         paste0("map_cost_type_",cat,".png")),
+    width  = 8, height = 6, dpi = 300
+  )
+}
+
+```

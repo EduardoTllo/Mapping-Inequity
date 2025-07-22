@@ -1,0 +1,221 @@
+---
+title: "final_cost"
+format: html
+execute:
+  echo: true
+  message: false
+  warning: false
+---
+```{r setup}
+# Required packages
+# install.packages(c("sf", "raster", "gdistance", "fasterize", "terra"))
+library(sf)
+library(raster)
+library(gdistance)
+library(fasterize)
+library(terra)
+
+```
+
+
+# 1. Read road network and assign speeds
+```{r}
+library(sf)
+library(dplyr)
+library(stringr)
+
+vias <- st_read("gis_osm_roads_free_1.shp") %>%
+  # 1) Keep only the desired road classes
+  filter(fclass %in% c(
+    "motorway", "trunk",
+    "primary", "secondary",
+    "tertiary", "unclassified",
+    "residential"
+  )) %>%
+  # 2) Extract and convert maxspeed
+  mutate(
+    speed_num = as.numeric(str_extract(maxspeed, "\\d+")),
+    vel_raw   = case_when(
+      str_detect(maxspeed, regex("mph$", ignore_case = TRUE)) ~ speed_num * 1.60934,
+      !is.na(speed_num)                                     ~ speed_num,
+      TRUE                                                  ~ NA_real_
+    ),
+    # 3) Choose between vel_raw or fallback by fclass
+    vel_kmh = coalesce(vel_raw,
+      case_when(
+        fclass %in% c("motorway","trunk")           ~ 100,
+        fclass == "primary"                         ~ 80,
+        fclass == "secondary"                       ~ 60,
+        fclass == "tertiary"                        ~ 50,
+        fclass %in% c("unclassified","residential") ~ 35,
+      )
+    )
+  ) %>%
+  # 4) While still in dplyr, keep only final columns
+  dplyr::select(-speed_num, -vel_raw)
+
+# Verify that vel_kmh is present:
+names(vias)
+# [ ... "maxspeed", "vel_kmh", "geometry" ]
+```
+```{r}
+library(sf)
+library(dplyr)
+
+provs <- st_read("Provincial INEI 2023 geogpsperu SuyoPomalia.shp") |>
+  rename(NOMBDEP = PROVINCIA)   # ← adjust only this line
+
+peru_union <- st_union(provs)
+peru_vect  <- vect(peru_union)
+r_base     <- rast(peru_vect, res = 0.01)
+crs(r_base) <- crs(vias)
+
+```
+
+
+# 2. Rasterize the road network at ~1 km (0.01°) and fill NA with walking speed
+```{r}
+r_vel <- rasterize(vias, r_base, field = "vel_kmh", fun = "max", touches = TRUE)
+r_vel[is.na(r_vel)] <- 5
+```
+
+# 3. Read and project the DEM
+```{r}
+dem       <- rast("cut_s30w090.tif")
+dem_utm   <- project(dem, "EPSG:32718")
+r_vel_utm <- project(r_vel, "EPSG:32718")
+dem_resamp <- resample(dem_utm, r_vel_utm, method = "bilinear")
+```
+
+# 4. Compute slope in degrees and tangent
+```{r}
+pend_deg <- terrain(dem_resamp, v = "slope", unit = "degrees")
+pend_rad <- pend_deg * pi/180
+pend_tan <- tan(pend_rad)
+```
+
+# 5. Walking (Tobler) and driving friction
+```{r}
+vel_tobler <- 6 * exp(-3.5 * abs(pend_tan + 0.05))   # km/h  
+fric_walk  <- 60 / vel_tobler                       # min/km
+
+fric_drive_base <- 60 / r_vel_utm                   # min/km per road
+fric_drive       <- fric_drive_base * (1 + pend_deg/20)
+```
+
+# 6. Read and project land-cover
+```{r}
+lc     <- rast("copernicus_landcover_peru.tif")
+lc_utm <- project(lc, "EPSG:32718")
+# Penalty table by class (adjust to your legend)
+# Build reclassification matrix: from, to, new value
+lc_utm[is.na(lc_utm)] <- 0
+rcl <- matrix(c(
+  0,   9,  2.5,   # forest
+  10, 29, 1.2,    # crops / grassland
+  30, 49, 2.5,    # forests
+  50, 59, 3.0,    # wetlands
+  60, 69, 1.0,    # urban areas
+  70, 79, 1.8,    # rock / bare
+  80, 89, 6.0,    # water / snow
+  90,100, 4.0     # mixed / other
+), ncol = 3, byrow = TRUE)
+lc_fact   <- classify(lc_utm, rcl, include.lowest = TRUE)
+lc_resamp <- resample(lc_fact, r_vel_utm, method = "near")
+
+```
+
+# 7. Read administrative limits and mask
+```{r}
+provs <- st_read("Provincial INEI 2023 geogpsperu SuyoPomalia.shp") |>
+   rename(NOMBDEP = PROVINCIA)  # ← adjust to the real field name
+provs_utm  <- st_transform(provs, crs = crs(r_vel_utm))
+provs_vect <- vect(provs_utm)
+```
+
+# 8. Combine frictions and apply land-cover + mask
+```{r}
+r_vel_utm[r_vel_utm < 15] <- NA
+fric_base   <- ifel(!is.na(r_vel_utm), fric_drive, fric_walk * lc_resamp)
+fric_soil   <- fric_base 
+fric_masked <- mask(fric_soil, provs_vect)
+fric_raster <- raster(fric_masked)
+```
+
+# 9. Transition model
+```{r}
+tr <- transition(
+  fric_raster,
+  transitionFunction = function(x) 1/mean(x),
+  directions = 8
+)
+```
+
+# 10. Read and reproject hospitals
+```{r}
+hosp <- read.csv("coords_III.csv")  # lon, lat
+coordinates(hosp) <- ~longitud + latitud
+proj4string(hosp)  <- CRS("+proj=longlat +datum=WGS84")
+hosp_utm <- spTransform(hosp, CRS("+init=EPSG:32718"))
+```
+
+# 11. Accumulated travel-time surface por categoria
+
+```{r}
+
+# ------------------------------------------------------------
+# Helper:  add province/department, calculate cost and save
+# ------------------------------------------------------------
+process_category <- function(cat_id, csv_path, tr, provs_utm) {
+  # --- 1) Read & reproject hospitals ---------------------------------
+  hosp <- read.csv(csv_path)
+  coordinates(hosp) <- ~longitud + latitud
+  proj4string(hosp)  <- CRS("+proj=longlat +datum=WGS84")
+  hosp_utm <- spTransform(hosp, CRS("+init=EPSG:32718"))
+  
+  # --- 2) Accumulated-cost raster ------------------------------------
+  cost <- accCost(tr, hosp_utm)
+  cost[is.infinite(cost)] <- NA
+  crs(cost) <- "EPSG:32718"
+  # --- 3) Extract values to provinces → build df_ext -----------------
+  cost_spat <- rast(cost)              # RasterLayer → SpatRaster
+  names(cost_spat) <- "tiempo"         # evita referencia a objeto 'cost'
+  
+  provs_vect <- vect(provs_utm)        # sf → SpatVector
+  
+  df_ext <- terra::extract(cost_spat, provs_vect) %>%  # devuelve ID + tiempo
+    dplyr::rename(region_id = ID) %>%                  # solo renombramos 'ID'
+    dplyr::mutate(
+      region       = provs_utm$NOMBDEP[region_id],     # campo real
+      departamento = provs_utm$DEPARTAMEN[region_id],  # ajusta nombres
+      provincia    = provs_utm$NOMBDEP[region_id]      # idem
+    )
+  
+  # --- 4) Save outputs -----------------------------------------------
+  saveRDS(df_ext,  paste0("df_ext", cat_id, ".rds"))
+  terra::writeRaster(cost, paste0("cost",  cat_id, ".tif"),
+                     overwrite = TRUE)
+  
+  invisible(NULL)
+}
+```
+
+```{r}
+cats <- data.frame(
+  id  = c(1, 2, 3),
+  csv = c("coords_I.csv", "coords_II.csv", "coords_III.csv"),
+  stringsAsFactors = FALSE
+)
+
+lapply(seq_len(nrow(cats)), function(i)
+  process_category(
+    cat_id    = cats$id[i],
+    csv_path  = cats$csv[i],
+    tr        = tr,
+    provs_utm = provs_utm
+  )
+)
+
+
+```
+
