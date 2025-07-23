@@ -267,7 +267,7 @@ cost_list  <- lapply(cost_files, function(f) {
 })
 
 # 6.2 Load province borders in WGS84
-provs_ll <- st_read("Provincial INEI 2023 geogpsperu SuyoPomalia.shp") %>%
+provs_ll <- st_read("DEPARTAMENTOS_inei_geogpsperu_suyopomalia.shp") %>%
   st_transform(4326)
 
 # 6.3 Legend breaks & labels
