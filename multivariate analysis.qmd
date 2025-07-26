@@ -1,0 +1,236 @@
+---
+title: "multivariate"
+format: html
+---
+
+```{r}
+# 1. Install/load necessary packages
+# install.packages(c("readxl", "dplyr", "stringr", "stringi"))
+library(readxl)
+library(dplyr)
+library(stringr)
+library(stringi)
+
+# 2. Define path to the Excel file
+file_path <- "IDE_IDH_population_medIII_data.xlsx"  # <-- replace with your actual file path
+
+# 3. Read sheet 3 (HDI, Population) and normalize Province to UPPERCASE
+df_hdi <- read_excel(file_path, sheet = 3) %>%
+  rename(PROVINCE = Province) %>%               # rename column
+  mutate(
+    PROVINCE = PROVINCE %>%
+      str_squish() %>%                           # trim whitespace
+      stri_trans_general("Latin-ASCII") %>%      # remove accents
+      toupper()                                  # convert to UPPERCASE
+  )
+
+# 4. Read sheet 4 (IDE) and normalize Province to UPPERCASE
+df_ide <- read_excel(file_path, sheet = 4) %>%
+  rename(PROVINCE = Province) %>%
+  mutate(
+    PROVINCE = PROVINCE %>%
+      str_squish() %>%
+      stri_trans_general("Latin-ASCII") %>%
+      toupper()
+  )
+
+# 5. Join by PROVINCE and convert all column names and text columns to UPPERCASE
+df_joined <- df_hdi %>%
+  left_join(df_ide, by = "PROVINCE") %>%
+  rename_with(toupper) %>%                      # convert column names to UPPERCASE
+  mutate(across(where(is.character), toupper))  # character columns to UPPERCASE
+
+# 6. Inspect the result
+print(df_joined)
+```
+
+
+```{r}
+# Assuming df_joined and libraries are already loaded:
+# library(readxl); library(dplyr); library(stringr); library(stringi)
+
+# 7. Define path to the Category III medians file
+med_path <- "IDE_IDH_population_medIII_data.xlsx"  # <-- adjust as needed
+
+# 8. Read sheet 5 and normalize
+df_medIII <- read_excel(med_path, sheet = 5) %>%
+  rename(
+    PROVINCE   = province,
+    DEPARTMENT = department
+  ) %>%
+  mutate(
+    PROVINCE   = PROVINCE   %>% str_squish() %>% stri_trans_general("Latin-ASCII") %>% toupper(),
+    DEPARTMENT = DEPARTMENT %>% str_squish() %>% stri_trans_general("Latin-ASCII") %>% toupper()
+  )
+
+# 9. Join and reorder columns
+df_final <- df_joined %>%
+  left_join(df_medIII, by = "PROVINCE") %>%
+  select(DEPARTMENT, everything())
+
+# 10. Inspect final data frame
+print(df_final)
+
+# 11. (Optional) Export to CSV
+write.csv(
+  df_final,
+  file = "data_IDH_IDE_population_medIII.csv",
+  row.names    = FALSE,
+  fileEncoding = "UTF-8"
+)
+```
+
+```{r}
+# Multivariate Analysis
+
+# 1. Install/load necessary packages
+# install.packages(c("dplyr", "corrplot", "AICcmodavg", "PerformanceAnalytics"))
+library(dplyr)
+library(corrplot)
+library(AICcmodavg)         # Forward selection AIC
+library(PerformanceAnalytics)  # Correlation analysis
+
+# 2. Read the CSV (adjust path if necessary)
+df <- read.csv(
+  "data_IDH_IDE_population_medIII.csv",  # <- path to your CSV
+  header          = TRUE,
+  stringsAsFactors = FALSE,
+  fileEncoding     = "UTF-8",
+  check.names      = FALSE
+)
+
+# 3. Examine structure and summary
+str(df)
+summary(df)
+
+# 4. Ensure numeric columns are numeric
+df <- df %>%
+  mutate(
+    HDI        = as.numeric(IDH),
+    POPULATION = as.numeric(POBLACION),
+    IDE        = as.numeric(IDE),
+    med_III    = as.numeric(med_III)
+  )
+
+# 5. Verify changes
+str(df)
+head(df)
+```
+
+```{r}
+# 1) Select only numeric columns
+num_df <- df %>% select_if(is.numeric)
+
+# 2) Truncate population and med_III to integers
+df <- df %>%
+  mutate(
+    med_III    = trunc(med_III),
+    POPULATION = trunc(POPULATION)
+    # IDE remains unchanged
+  )
+
+# 3) Compute correlation matrix, pairwise complete
+corr_mat <- cor(num_df, use = "pairwise.complete.obs")
+
+# 4) Plot correlogram
+corrplot(
+  corr_mat,
+  method     = "circle",
+  type       = "upper",      # upper triangle only
+  tl.col     = "black",      # label color
+  tl.srt     = 45,           # label rotation
+  addCoef.col = "black"      # numeric coefficients
+)
+```
+
+```{r}
+# Filter out LIMA and rescale population
+df2 <- df %>%
+  filter(PROVINCE != "LIMA") %>%
+  mutate(
+    POPULATION = round(POPULATION / 10000)  # scale to tens of thousands
+  )
+
+# Fit a null Poisson model
+null_model <- glm(med_III ~ 1, family = poisson, data = df2)
+summary(null_model)
+
+# Poisson models with individual predictors
+model_ide <- glm(med_III ~ IDE, family = poisson, data = df2)
+model_hdi <- glm(med_III ~ HDI, family = poisson, data = df2)
+model_pop <- glm(med_III ~ POPULATION, family = poisson, data = df2)
+
+# Compare AIC for Poisson models
+poisson_models <- list(null_model, model_ide, model_hdi, model_pop)
+model_names       <- c("Null", "IDE", "HDI", "Population")
+aictab(cand.set = poisson_models, modnames = model_names)
+
+# Full Poisson model
+full_poisson <- glm(med_III ~ IDE + HDI + POPULATION, family = poisson, data = df2)
+summary(full_poisson)
+
+# Likelihood ratio test
+anova(null_model, model_ide, model_hdi, model_pop, full_poisson, test = "Chisq")
+
+# Check dispersion
+library(AER)
+dispersiontest(full_poisson, trafo = 1)
+
+# Breusch-Pagan test for heteroskedasticity
+library(lmtest)
+bptest(full_poisson)
+```
+
+```{r}
+# Negative binomial models
+library(MASS)
+
+nb_null  <- glm.nb(med_III ~ 1, data = df2)
+nb_ide   <- glm.nb(med_III ~ IDE, data = df2)
+nb_hdi   <- glm.nb(med_III ~ HDI, data = df2)
+nb_pop   <- glm.nb(med_III ~ POPULATION, data = df2)
+nb_full  <- glm.nb(med_III ~ IDE + HDI + POPULATION, data = df2)
+
+# Compare AIC for negative binomial models
+nb_models <- list(nb_null, nb_ide, nb_hdi, nb_full)
+nb_names  <- c("Null", "IDE", "HDI", "Full")
+aictab(cand.set = nb_models, modnames = nb_names)
+```
+
+```{r}
+library(broom)
+library(purrr)
+library(dplyr)
+
+# 2) Create a named list of your models
+models_list <- list(
+  model_ide = nb_ide,
+  model_hdi = nb_hdi,
+  model_pop = nb_pop,
+  model_full = nb_full
+)
+
+# 3) Function to extract prevalence ratios (PR) and CIs
+extract_pr <- function(mod, mod_name) {
+  tidy(mod, conf.int = TRUE) %>%
+    transmute(
+      model   = mod_name,
+      term,
+      estimate,     # log-scale coefficient
+      std.error,
+      p.value,
+      PR    = exp(estimate),
+      PR_low  = exp(conf.low),
+      PR_high = exp(conf.high)
+    )
+}
+
+# 4) Apply function to each model and bind results
+pr_table <- imap_dfr(models_list, ~ extract_pr(.x, .y))
+
+# 5) View and save
+print(pr_table)
+library(writexl)
+write_xlsx(pr_table, path = "prevalence_ratios_table.xlsx")
+```
+
