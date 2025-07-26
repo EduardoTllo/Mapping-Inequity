@@ -17,7 +17,6 @@ cost3   <- terra::rast("cost3.tif")
 
 ## 2. Combine Categories I, II, and III
 ```{r}
-library(dplyr)
 library(tidyr)
 library(purrr)
 library(broom)
@@ -26,7 +25,7 @@ library(forcats)
 library(ggplot2)
 library(knitr)
 library(kableExtra)
-
+library(dplyr)
 
 # Stack all three category data frames into one, filter out missing times
 df_all <- bind_rows(
@@ -46,20 +45,23 @@ library(forcats)
 library(ggplot2)
 library(scales)
 
-# Function to create and save a boxplot for one category
+# Function to create and save a boxplot for one category, ordering departments from highest to lowest median
 plot_category <- function(cat, df, output_file) {
   df_cat <- df %>%
     filter(category == cat) %>%
     mutate(
       time_h      = tiempo / 60,
-      departamento = fct_reorder(departamento, time_h, median)
+      # Order departments by descending median time
+      departamento = fct_reorder(departamento, time_h, median, .desc = TRUE)
     )
   
-  # Median per province (for overlay points)
+  # Median per province (for overlay points), also ordered descending
   df_prov_med <- df_cat %>%
     group_by(departamento, provincia) %>%
     summarise(median_h = median(time_h, na.rm = TRUE), .groups = "drop") %>%
-    mutate(departamento = fct_reorder(departamento, median_h, median))
+    mutate(
+      departamento = fct_reorder(departamento, median_h, median, .desc = TRUE)
+    )
   
   p <- ggplot(df_cat, aes(x = departamento, y = time_h)) +
     geom_boxplot(alpha = 0.7) +
@@ -111,6 +113,7 @@ plot_category <- function(cat, df, output_file) {
 plot_category("III", df_all, "boxplot_catIII_departments.png")
 plot_category("II",  df_all, "boxplot_catII_departments.png")
 plot_category("I",   df_all, "boxplot_catI_departments.png")
+
 ```
 
 ## 4. Provincial Medians Distribution
@@ -312,5 +315,62 @@ for(cat in names(cost_list)) {
     width  = 8, height = 6, dpi = 300
   )
 }
+
+```
+
+
+```{r}
+## 2) Table 2. Median ± IQR (h), province‐counts by department & category, plus n provinces
+library(dplyr)
+library(knitr)
+library(kableExtra)
+if (!requireNamespace("writexl", quietly=TRUE)) install.packages("writexl")
+library(writexl)
+
+table2 <- df_all %>%
+  # Sólo categorías II y III
+  filter(category %in% c("II","III")) %>%
+  # Convertir tiempo a horas
+  mutate(time_h = tiempo / 60) %>%
+  # Calcular mediana provincial de tiempo
+  group_by(departamento, provincia, category) %>%
+  summarise(
+    med_h = median(time_h, na.rm=TRUE),
+    .groups="drop"
+  ) %>%
+  # Resumir a nivel de departamento + categoría
+  group_by(departamento, category) %>%
+  summarise(
+    n_prov     = n(),                                # número de provincias
+    Median_h   = median(med_h, na.rm=TRUE),
+    IQR_h      = IQR(med_h,   na.rm=TRUE),
+    n_lt1h     = sum(med_h < 1, na.rm=TRUE),
+    n_1to4h    = sum(med_h >= 1 & med_h < 4, na.rm=TRUE),
+    n_ge4h     = sum(med_h >= 4, na.rm=TRUE),
+    .groups="drop"
+  ) %>%
+  # Formato “Median ± IQR”
+  mutate(`Median ± IQR (h)` = sprintf("%.2f ± %.2f", Median_h, IQR_h)) %>%
+  # Seleccionar y renombrar columnas
+  select(
+    Departamento        = departamento,
+    Category            = category,
+    `N provinces`       = n_prov,
+    `Median ± IQR (h)`,
+    `< 1 h`             = n_lt1h,
+    `1 to < 4 h`        = n_1to4h,
+    `≥ 4 h`             = n_ge4h
+  )
+
+# 3) Mostrar la tabla en el documento
+table2 %>%
+  kable(
+    caption = "Table 2. Median ± IQR (hours) of travel time and province‐counts by department for Categories II and III",
+    align   = "lccccc"
+  ) %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+# 4) Exportar a Excel
+write_xlsx(table2, path = "table2.xlsx")
 
 ```
