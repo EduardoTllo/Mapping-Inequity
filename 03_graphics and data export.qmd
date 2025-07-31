@@ -374,3 +374,59 @@ table2 %>%
 write_xlsx(table2, path = "table2.xlsx")
 
 ```
+
+
+
+```{r}
+## Tabla X. Mediana ± IQR (h) por provincia, categorías II y III
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(writexl)
+
+table_prov <- df_all %>%
+  # 1) Mantener solo categorías de interés
+  filter(category %in% c("II", "III")) %>%
+  # 2) Pasar tiempo a horas
+  mutate(time_h = tiempo / 60) %>%
+  # 3) Resumir a nivel de provincia + categoría
+  group_by(departamento, provincia, category) %>%
+  summarise(
+    n_obs    = n(),                              # filas que caen en la provincia
+    Median_h = median(time_h, na.rm = TRUE),
+    IQR_h    = IQR(time_h,   na.rm = TRUE),
+    .groups  = "drop"
+  ) %>%
+  # 4) Dar formato “Mediana ± IQR” y clasificar el baremo
+  mutate(
+    `Median ± IQR (h)` = sprintf("%.2f ± %.2f", Median_h, IQR_h),
+    `Time range` = case_when(
+      Median_h < 1            ~ "< 1 h",
+      Median_h >= 1 & Median_h < 4 ~ "1 to < 4 h",
+      TRUE                    ~ "≥ 4 h"
+    )
+  ) %>%
+  # 5) Seleccionar y renombrar columnas
+  select(
+    Department = departamento,
+    Province   = provincia,
+    Category   = category,
+    `Median ± IQR (h)`,
+    `Time range`
+  ) %>%
+  arrange(Department, Province, Category)
+
+# 6) Mostrar la tabla en el documento
+table_prov %>%
+  kable(
+    caption = "Median ± IQR (hours) of travel time per province for Categories II and III",
+    align   = "lcccc"
+  ) %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+# 7) Exportar a Excel
+write_xlsx(table_prov, path = "table_province_times.xlsx")
+
+```
+
+
